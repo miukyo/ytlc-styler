@@ -8,7 +8,7 @@ Web-based Svelte overlay editor for YouTube live chat overlays.
 - modern-monaco editor
 - Custom runtime for HTML + JavaScript + CSS overlays
 - Svelte-like template syntax support (`{#each ...}` and `{expr}`)
-- SQLite + Kysely for overlay persistence
+- Supabase Postgres + Kysely for overlay persistence
 - `@miukyo/ytlc` bridge for live chat and dummy messages
 
 ## Routes
@@ -44,8 +44,25 @@ npm run build
 
 ## Storage
 
-SQLite file location:
+Set one of these environment variables before running the app:
 
-- `.data/overlays.sqlite`
+- `DATABASE_URL`
+- `SUPABASE_DB_URL`
 
-The table is created automatically on first server start.
+Run database setup:
+
+```sh
+npm run db:migrate
+```
+
+Expected schema:
+
+- `public.overlays(id text primary key, name text null, code text not null, compiled_js text not null, created_at text not null, updated_at text not null)`
+
+Generate Supabase types (recommended) and map them through `kysely-supabase`:
+
+```sh
+npx supabase gen types typescript --linked > src/lib/server/supabase.generated.ts
+```
+
+Then replace the inline schema in `src/lib/server/db.types.ts` with an import from your generated file.
