@@ -951,8 +951,6 @@ export {};
 					onclick={() =>
 						chatBridge.sendDummy({
 							mode: "text",
-							text: "test message",
-							authorName: "dev",
 						})}
 				>
 					Send Dummy
