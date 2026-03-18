@@ -44,6 +44,21 @@
 		return { script, style, markup };
 	};
 
+	const applyStyle = (styleText) => {
+		if (styleTag) {
+			styleTag.remove();
+			styleTag = null;
+		}
+
+		if (typeof styleText !== 'string' || styleText.length === 0) {
+			return;
+		}
+
+		styleTag = document.createElement('style');
+		styleTag.textContent = styleText;
+		document.head.appendChild(styleTag);
+	};
+
 	const mountSource = (source) => {
 		const parts = parseSource(source);
 
@@ -52,16 +67,7 @@
 			return;
 		}
 
-		if (styleTag) {
-			styleTag.remove();
-			styleTag = null;
-		}
-
-		if (parts.style) {
-			styleTag = document.createElement('style');
-			styleTag.textContent = parts.style;
-			document.head.appendChild(styleTag);
-		}
+		applyStyle(parts.style);
 
 		root.innerHTML = parts.markup;
 
@@ -105,6 +111,11 @@
 					'*'
 				);
 			}
+			return;
+		}
+
+		if (data.type === 'overlay:style') {
+			applyStyle(typeof data.payload?.style === 'string' ? data.payload.style : '');
 			return;
 		}
 

@@ -183,6 +183,7 @@ export {};
 	let isCompiling = false;
 	let isConnected = false;
 	let frameReady = false;
+	let overlayMounted = false;
 	let exportFailed = false;
 	let previewStatus = "waiting for preview runtime";
 	let previewUrl = "/overlay-frame.html";
@@ -211,23 +212,96 @@ export {};
 	let editorInstances: Array<{ dispose: () => void; layout?: () => void }> = [];
 	let compileTimer: ReturnType<typeof setTimeout> | undefined;
 	let lastCompiledSource = "";
+	let lastRenderedHtml = "";
+	let lastRenderedCss = "";
+	let lastRenderedTs = "";
+	type QueuedPreviewMessage = {
+		message: unknown;
+		requireMounted: boolean;
+	};
+	let queuedPreviewMessages: QueuedPreviewMessage[] = [];
+	const MAX_QUEUED_PREVIEW_MESSAGES = 200;
 
 	const chatBridge = new ChatBridge();
+
+	const readMessageType = (message: unknown): string | null => {
+		if (!message || typeof message !== "object") {
+			return null;
+		}
+
+		const maybe = message as { type?: unknown };
+		return typeof maybe.type === "string" ? maybe.type : null;
+	};
+
+	const queuePreviewMessage = (entry: QueuedPreviewMessage) => {
+		const type = readMessageType(entry.message);
+
+		if (type === "overlay:mount" || type === "overlay:style") {
+			queuedPreviewMessages = queuedPreviewMessages.filter((queued) => {
+				return readMessageType(queued.message) !== type;
+			});
+		}
+
+		queuedPreviewMessages = [...queuedPreviewMessages, entry];
+		if (queuedPreviewMessages.length > MAX_QUEUED_PREVIEW_MESSAGES) {
+			queuedPreviewMessages = queuedPreviewMessages.slice(
+				queuedPreviewMessages.length - MAX_QUEUED_PREVIEW_MESSAGES,
+			);
+		}
+	};
+
+	const canPostToPreview = (requireMounted: boolean) => {
+		return (
+			!!previewFrame?.contentWindow &&
+			frameReady &&
+			(!requireMounted || overlayMounted)
+		);
+	};
+
+	const flushPreviewQueue = () => {
+		if (!previewFrame?.contentWindow || !frameReady) {
+			return;
+		}
+
+		const remaining: QueuedPreviewMessage[] = [];
+		for (const queued of queuedPreviewMessages) {
+			if (!canPostToPreview(queued.requireMounted)) {
+				remaining.push(queued);
+				continue;
+			}
+
+			previewFrame.contentWindow.postMessage(queued.message, "*");
+		}
+
+		queuedPreviewMessages = remaining;
+	};
 
 	const mountPreview = () => {
 		if (!lastCompiledSource) {
 			return;
 		}
 
+		overlayMounted = false;
+
 		if (!previewFrame?.contentWindow || !frameReady) {
 			previewStatus = "waiting for preview runtime";
+			queuePreviewMessage({
+				message: {
+					type: "overlay:mount",
+					payload: { source: lastCompiledSource },
+				},
+				requireMounted: false,
+			});
 			return;
 		}
 
-		postToPreview({
+		postToPreview(
+			{
 			type: "overlay:mount",
 			payload: { source: lastCompiledSource },
-		});
+			},
+			{ allowQueue: true },
+		);
 		previewStatus = "mounting overlay";
 	};
 
@@ -460,12 +534,23 @@ export {};
 		tsCode = tsModel?.getValue() ?? tsCode;
 	};
 
-	const postToPreview = (message: unknown) => {
-		if (!previewFrame?.contentWindow || !frameReady) {
+	const postToPreview = (
+		message: unknown,
+		options?: { allowQueue?: boolean; requireMounted?: boolean },
+	) => {
+		const requireMounted = options?.requireMounted === true;
+		const targetWindow = previewFrame?.contentWindow;
+
+		if (!targetWindow || !canPostToPreview(requireMounted)) {
 			previewStatus = "preview runtime not ready";
-			return;
+			if (options?.allowQueue) {
+				queuePreviewMessage({ message, requireMounted });
+			}
+			return false;
 		}
-		previewFrame.contentWindow.postMessage(message, "*");
+
+		targetWindow.postMessage(message, "*");
+		return true;
 	};
 
 	const validateAndPreview = async () => {
@@ -473,9 +558,33 @@ export {};
 		compileError = "";
 		try {
 			syncSourceFromModels();
+
+			const isCssOnlyUpdate =
+				frameReady &&
+				lastCompiledSource.length > 0 &&
+				htmlCode === lastRenderedHtml &&
+				tsCode === lastRenderedTs &&
+				cssCode !== lastRenderedCss;
+
+			if (isCssOnlyUpdate) {
+				postToPreview(
+					{
+						type: "overlay:style",
+						payload: { style: cssCode },
+					},
+					{ allowQueue: true, requireMounted: true },
+				);
+				lastRenderedCss = cssCode;
+				previewStatus = "styles updated";
+				return;
+			}
+
 			const source = composeSource();
 			const result = await compileOverlayInBrowser(source);
 			lastCompiledSource = result.runtimeSource;
+			lastRenderedHtml = htmlCode;
+			lastRenderedCss = cssCode;
+			lastRenderedTs = tsCode;
 			mountPreview();
 		} catch (error) {
 			compileError = error instanceof Error ? error.message : "Compile failed";
@@ -612,10 +721,10 @@ export {};
 	};
 
 	const onPreviewFrameLoad = () => {
-		if (!frameReady) {
-			frameReady = true;
-		}
+		frameReady = true;
+		overlayMounted = false;
 
+		flushPreviewQueue();
 		mountPreview();
 	};
 
@@ -768,7 +877,10 @@ export {};
 			saveCurrentDraft();
 
 			const unsubscribe = chatBridge.subscribe((chatItem) => {
-				postToPreview({ type: "chat:item", payload: chatItem });
+				postToPreview(
+					{ type: "chat:item", payload: chatItem },
+					{ allowQueue: true, requireMounted: true },
+				);
 			});
 
 			window.addEventListener("message", async (event) => {
@@ -778,6 +890,7 @@ export {};
 				const payload = event.data ?? {};
 				if (payload.type === "overlay:ready") {
 					frameReady = true;
+					flushPreviewQueue();
 					previewStatus = "runtime ready";
 					mountPreview();
 					return;
@@ -790,6 +903,8 @@ export {};
 					return;
 				}
 				if (payload.type === "overlay:mounted") {
+					overlayMounted = true;
+					flushPreviewQueue();
 					previewStatus = "overlay mounted";
 					if (!compileError) {
 						compileError = "";
