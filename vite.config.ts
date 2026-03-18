@@ -3,10 +3,5 @@ import { defineConfig } from 'vite';
 import { functionsMixins } from 'vite-plugin-functions-mixins';
 
 export default defineConfig({
-	plugins: [sveltekit(), functionsMixins({ deps: ['m3-svelte'] })],
-	build: {
-		rollupOptions: {
-			external: ["@miukyo/ytlc"] 
-		}
-	}
+	plugins: [sveltekit(), functionsMixins({ deps: ['m3-svelte'] })]
 });
