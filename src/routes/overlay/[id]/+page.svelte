@@ -109,5 +109,6 @@
 		height: 100vh;
 		border: 0;
 		background: transparent;
+		color-scheme: normal;
 	}
 </style>
