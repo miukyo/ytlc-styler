@@ -1,0 +1,38 @@
+{
+	"name": "ytlc-styler",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+	},
+	"devDependencies": {
+		"@fontsource-variable/google-sans-flex": "^5.2.1",
+		"@ktibow/iconset-material-symbols": "^0.0.1764827375",
+		"@sveltejs/adapter-auto": "^7.0.0",
+		"@sveltejs/kit": "^2.50.2",
+		"@sveltejs/vite-plugin-svelte": "^6.2.4",
+		"@types/better-sqlite3": "^7.6.13",
+		"@types/node": "^25.5.0",
+		"svelte": "^5.51.0",
+		"svelte-check": "^4.4.2",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.1"
+	},
+	"dependencies": {
+		"@miukyo/ytlc": "^0.1.2",
+		"better-sqlite3": "^12.8.0",
+		"esbuild": "^0.27.4",
+		"kysely": "^0.28.12",
+		"m3-svelte": "^7.1.2",
+		"modern-monaco": "^0.4.0",
+		"prettier": "^3.8.1",
+		"uuid": "^13.0.0",
+		"vite-plugin-functions-mixins": "^0.4.1"
+	}
+}
