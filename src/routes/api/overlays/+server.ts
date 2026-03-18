@@ -9,6 +9,7 @@ export const POST: RequestHandler = async ({ request, url }) => {
 	const body = (await request.json()) as {
 		id?: string;
 		code?: string;
+		compiledHtml?: string;
 		name?: string;
 		handle?: string;
 		channelId?: string;
@@ -37,16 +38,26 @@ export const POST: RequestHandler = async ({ request, url }) => {
 		return json({ error: 'handle, channelId, or liveId is required for export' }, { status: 400 });
 	}
 
-	let compiledHtml = '';
-	try {
-		compiledHtml = (await compileOverlay(body.code)).compiledHtml;
-	} catch (error) {
-		return json(
-			{
-				error: error instanceof Error ? error.message : 'Compile failed'
-			},
-			{ status: 400 }
-		);
+	let compiledHtml =
+		typeof body.compiledHtml === 'string' && body.compiledHtml.trim().length > 0
+			? body.compiledHtml
+			: '';
+
+	if (compiledHtml.length > 300_000) {
+		return json({ error: 'compiledHtml exceeds size limit' }, { status: 400 });
+	}
+
+	if (!compiledHtml) {
+		try {
+			compiledHtml = (await compileOverlay(body.code)).compiledHtml;
+		} catch (error) {
+			return json(
+				{
+					error: error instanceof Error ? error.message : 'Compile failed'
+				},
+				{ status: 400 }
+			);
+		}
 	}
 
 	const id = typeof body.id === 'string' && body.id.trim().length > 0 ? body.id.trim() : uuidv4();

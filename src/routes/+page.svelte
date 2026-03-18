@@ -5,17 +5,21 @@
 	import { onMount } from "svelte";
 	import {
 		Button,
-		TextField,
 		Tabs,
 		Card,
 		TextFieldOutlined,
-		Select,
 		SelectOutlined,
 		Dialog,
 	} from "m3-svelte";
 
 	import { ChatBridge } from "$lib/client/chat-bridge";
+	import { compileOverlayInBrowser } from "$lib/client/overlay-compiler";
 	import { DEFAULT_OVERLAY_SOURCE } from "$lib/shared/default-overlay";
+	import {
+		composeOverlaySource,
+		defaultsFromOverlaySource,
+		splitOverlaySource,
+	} from "$lib/shared/overlay-source";
 	import type { OverlayExportResponse } from "$lib/shared/types";
 
 	const DRAFTS_KEY = "ytlc-styler:drafts:v3";
@@ -129,29 +133,10 @@ declare global {
 export {};
 `.trim();
 
-	const DEFAULT_HTML = (() => {
-		const markup = DEFAULT_OVERLAY_SOURCE.replace(
-			/<script[\s\S]*?<\/script>/gi,
-			"",
-		)
-			.replace(/<style[\s\S]*?<\/style>/gi, "")
-			.trim();
-		return markup;
-	})();
-
-	const DEFAULT_CSS = (() => {
-		const styleMatch = DEFAULT_OVERLAY_SOURCE.match(
-			/<style[\s\S]*?>([\s\S]*?)<\/style>/i,
-		);
-		return styleMatch ? styleMatch[1].trim() : "";
-	})();
-
-	const DEFAULT_TS = (() => {
-		const scriptMatch = DEFAULT_OVERLAY_SOURCE.match(
-			/<script[\s\S]*?>([\s\S]*?)<\/script>/i,
-		);
-		return scriptMatch ? scriptMatch[1].trim() : "";
-	})();
+	const defaults = defaultsFromOverlaySource(DEFAULT_OVERLAY_SOURCE);
+	const DEFAULT_HTML = defaults.html;
+	const DEFAULT_CSS = defaults.css;
+	const DEFAULT_TS = defaults.ts;
 
 	type DraftEntry = {
 		id: string;
@@ -225,31 +210,36 @@ export {};
 	let modelSubscriptions: ModelSubscription[] = [];
 	let editorInstances: Array<{ dispose: () => void; layout?: () => void }> = [];
 	let compileTimer: ReturnType<typeof setTimeout> | undefined;
+	let lastCompiledSource = "";
 
 	const chatBridge = new ChatBridge();
 
+	const mountPreview = () => {
+		if (!lastCompiledSource) {
+			return;
+		}
+
+		if (!previewFrame?.contentWindow || !frameReady) {
+			previewStatus = "waiting for preview runtime";
+			return;
+		}
+
+		postToPreview({
+			type: "overlay:mount",
+			payload: { source: lastCompiledSource },
+		});
+		previewStatus = "mounting overlay";
+	};
+
 	const composeSource = () => {
-		const scriptCloseTag = "</scr" + "ipt>";
-		return `<script>\n${tsCode}\n${scriptCloseTag}\n\n${htmlCode}\n\n<style>\n${cssCode}\n</style>\n`;
+		return composeOverlaySource({
+			html: htmlCode,
+			css: cssCode,
+			ts: tsCode,
+		});
 	};
 
-	const splitSource = (source: string) => {
-		const scriptMatch = source.match(/<script[\s\S]*?>([\s\S]*?)<\/script>/i);
-		const styleMatch = source.match(/<style[\s\S]*?>([\s\S]*?)<\/style>/i);
-
-		const script = scriptMatch ? scriptMatch[1].trim() : "";
-		const style = styleMatch ? styleMatch[1].trim() : "";
-		const markup = source
-			.replace(/<script[\s\S]*?<\/script>/gi, "")
-			.replace(/<style[\s\S]*?<\/style>/gi, "")
-			.trim();
-
-		return {
-			html: markup,
-			css: style,
-			ts: script,
-		};
-	};
+	const splitSource = splitOverlaySource;
 
 	const persistDrafts = () => {
 		if (!browser) {
@@ -484,24 +474,9 @@ export {};
 		try {
 			syncSourceFromModels();
 			const source = composeSource();
-			const response = await fetch("/api/preview", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ code: source }),
-			});
-
-			const payload = (await response.json()) as {
-				previewUrl?: string;
-				error?: string;
-			};
-
-			if (!response.ok || !payload.previewUrl) {
-				throw new Error(payload.error ?? "Compile failed");
-			}
-
-			frameReady = false;
-			previewStatus = "loading preview html";
-			previewUrl = payload.previewUrl;
+			const result = await compileOverlayInBrowser(source);
+			lastCompiledSource = result.runtimeSource;
+			mountPreview();
 		} catch (error) {
 			compileError = error instanceof Error ? error.message : "Compile failed";
 		} finally {
@@ -582,6 +557,7 @@ export {};
 
 			syncSourceFromModels();
 			const source = composeSource();
+			const localCompiled = await compileOverlayInBrowser(source);
 			const response = await fetch("/api/overlays", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
@@ -592,6 +568,7 @@ export {};
 					channelId: channelIdValue || undefined,
 					liveId: liveIdValue || undefined,
 					code: source,
+					compiledHtml: localCompiled.compiledHtml,
 				}),
 			});
 
@@ -632,6 +609,14 @@ export {};
 	const stopChat = async () => {
 		await chatBridge.stop();
 		isConnected = false;
+	};
+
+	const onPreviewFrameLoad = () => {
+		if (!frameReady) {
+			frameReady = true;
+		}
+
+		mountPreview();
 	};
 
 	$: {
@@ -794,6 +779,7 @@ export {};
 				if (payload.type === "overlay:ready") {
 					frameReady = true;
 					previewStatus = "runtime ready";
+					mountPreview();
 					return;
 				}
 				if (payload.type === "overlay:error") {
@@ -1008,6 +994,7 @@ export {};
 			<iframe
 				title="preview"
 				bind:this={previewFrame}
+				onload={onPreviewFrameLoad}
 				sandbox="allow-scripts"
 				allowtransparency
 				src={previewUrl}
