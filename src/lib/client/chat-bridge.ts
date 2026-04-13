@@ -54,6 +54,9 @@ export class ChatBridge {
 	private readonly listeners = new Set<ChatCallback>();
 	private initialized = false;
 	private readyPromise: Promise<void> | null = null;
+	private reconnectTimer: number | null = null;
+	private reconnectAttempts = 0;
+	private lifecycleHooksBound = false;
 	private dummySequence = 0;
 
 	constructor(sessionId?: string) {
@@ -65,6 +68,99 @@ export class ChatBridge {
 		for (const listener of this.listeners) {
 			listener(chatItem);
 		}
+	}
+
+	private clearReconnectTimer(): void {
+		if (this.reconnectTimer === null) {
+			return;
+		}
+
+		window.clearTimeout(this.reconnectTimer);
+		this.reconnectTimer = null;
+	}
+
+	private getReconnectDelayMs(): number {
+		const baseDelay = 1_000;
+		const maxDelay = 15_000;
+		const delay = Math.min(maxDelay, baseDelay * 2 ** this.reconnectAttempts);
+		return delay + Math.floor(Math.random() * 250);
+	}
+
+	private bindLifecycleHooks(): void {
+		if (this.lifecycleHooksBound) {
+			return;
+		}
+
+		const recover = () => {
+			if (!this.listeners.size) {
+				return;
+			}
+
+			if (!this.eventSource || this.eventSource.readyState === EventSource.CLOSED) {
+				this.scheduleReconnect(0);
+			}
+		};
+
+		window.addEventListener('focus', recover);
+		document.addEventListener('visibilitychange', () => {
+			if (document.visibilityState === 'visible') {
+				recover();
+			}
+		});
+
+		this.lifecycleHooksBound = true;
+	}
+
+	private scheduleReconnect(delayMs = this.getReconnectDelayMs()): void {
+		if (!this.listeners.size) {
+			return;
+		}
+
+		if (this.reconnectTimer !== null) {
+			return;
+		}
+
+		this.reconnectTimer = window.setTimeout(() => {
+			this.reconnectTimer = null;
+			void this.reconnect();
+		}, delayMs);
+	}
+
+	private async reconnect(): Promise<void> {
+		if (!this.listeners.size) {
+			return;
+		}
+
+		this.disconnect();
+		await this.init();
+	}
+
+	private wireEventSource(eventSource: EventSource): void {
+		eventSource.onopen = () => {
+			this.reconnectAttempts = 0;
+		};
+
+		eventSource.onerror = () => {
+			if (!this.listeners.size) {
+				return;
+			}
+
+			if (eventSource.readyState === EventSource.CLOSED) {
+				this.reconnectAttempts += 1;
+				this.scheduleReconnect();
+			}
+		};
+
+		eventSource.onmessage = (event) => {
+			const payload = JSON.parse(event.data) as {
+				type?: 'chat:item' | 'chat:error' | 'chat:stopped' | 'chat:started';
+				payload?: unknown;
+			};
+
+			if (payload.type === 'chat:item') {
+				this.emit(payload.payload);
+			}
+		};
 	}
 
 	private randomInt(min: number, max: number): number {
@@ -264,33 +360,26 @@ export class ChatBridge {
 			return;
 		}
 
-		this.eventSource = new EventSource(`/api/chat/events?sessionId=${encodeURIComponent(this.sessionId)}`);
-		this.readyPromise = new Promise<void>((resolve) => {
-			if (!this.eventSource) {
-				resolve();
-				return;
-			}
+		this.bindLifecycleHooks();
+		this.clearReconnectTimer();
 
-			this.eventSource.onopen = () => {
+		this.eventSource = new EventSource(`/api/chat/events?sessionId=${encodeURIComponent(this.sessionId)}`);
+		const source = this.eventSource;
+		this.wireEventSource(source);
+		this.readyPromise = new Promise<void>((resolve) => {
+			const previousOnOpen = source.onopen;
+			source.onopen = (event) => {
+				previousOnOpen?.call(source, event);
 				resolve();
 			};
 
-			this.eventSource.onerror = () => {
+			const previousOnError = source.onerror;
+			source.onerror = (event) => {
+				previousOnError?.call(source, event);
 				// Keep bridge usable even if ready signal is delayed or unavailable.
 				resolve();
 			};
 		});
-
-		this.eventSource.onmessage = (event) => {
-			const payload = JSON.parse(event.data) as {
-				type?: 'chat:item' | 'chat:error' | 'chat:stopped' | 'chat:started';
-				payload?: unknown;
-			};
-
-			if (payload.type === 'chat:item') {
-				this.emit(payload.payload);
-			}
-		};
 
 		this.initialized = true;
 		await this.readyPromise;
@@ -299,7 +388,12 @@ export class ChatBridge {
 	subscribe(callback: ChatCallback): () => void {
 		this.listeners.add(callback);
 		void this.init();
-		return () => this.listeners.delete(callback);
+		return () => {
+			this.listeners.delete(callback);
+			if (!this.listeners.size) {
+				this.disconnect();
+			}
+		};
 	}
 
 	async start(options: BridgeStartOptions): Promise<void> {
@@ -329,7 +423,11 @@ export class ChatBridge {
 	}
 
 	disconnect(): void {
+		this.clearReconnectTimer();
+
 		if (!this.eventSource) {
+			this.initialized = false;
+			this.readyPromise = null;
 			return;
 		}
 		this.eventSource.close();

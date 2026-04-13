@@ -9,11 +9,25 @@ export const GET: RequestHandler = async ({ request }) => {
 	}
 
 	const encoder = new TextEncoder();
+	const heartbeatMs = 15_000;
 
 	const stream = new ReadableStream<Uint8Array>({
 		start(controller) {
+			let closed = false;
+
 			const send = (event: unknown) => {
+				if (closed) {
+					return;
+				}
 				controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+			};
+
+			const sendHeartbeat = () => {
+				if (closed) {
+					return;
+				}
+				// SSE comment frame keeps intermediaries and browsers from timing out idle streams.
+				controller.enqueue(encoder.encode(`: keepalive\n\n`));
 			};
 
 			send({ type: 'chat:started', payload: { connected: true, sessionId } });
@@ -22,14 +36,30 @@ export const GET: RequestHandler = async ({ request }) => {
 				send(event);
 			});
 
-			request.signal.addEventListener('abort', () => {
+			const heartbeat = setInterval(sendHeartbeat, heartbeatMs);
+
+			const closeStream = () => {
+				if (closed) {
+					return;
+				}
+
+				closed = true;
+				clearInterval(heartbeat);
 				unsubscribe();
+
 				try {
 					controller.close();
 				} catch {
 					// Stream may already be closed.
 				}
+			};
+
+			request.signal.addEventListener('abort', () => {
+				closeStream();
 			});
+		},
+		cancel() {
+			// No-op: request.abort handles cleanup in start().
 		}
 	});
 
