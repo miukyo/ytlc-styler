@@ -14,8 +14,14 @@ interface StoredOverlay {
 const GITHUB_GIST_API_URL = 'https://api.github.com/gists';
 const GITHUB_GIST_MAX_BYTES = 1_000_000;
 const GIST_FILE_NAME = 'overlay.json';
+const GIST_LIST_PAGE_SIZE = 100;
+const GIST_LIST_MAX_PAGES = 10;
 
 const isLikelyGistId = (value: string): boolean => /^[a-f0-9]{8,}$/i.test(value.trim());
+const isLikelyUuid = (value: string): boolean =>
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+		value.trim()
+	);
 
 const requireToken = (): string => {
 	const token = env.GITHUB_GIST_TOKEN;
@@ -78,6 +84,110 @@ const parseStoredOverlay = (source: string): StoredOverlay | null => {
 		createdAt: record.createdAt,
 		updatedAt: record.updatedAt
 	};
+};
+
+const getStoredOverlayFromGistId = async (
+	id: string
+): Promise<{ gistId: string; stored: StoredOverlay } | null> => {
+	const response = await fetch(`${GITHUB_GIST_API_URL}/${encodeURIComponent(id)}`, {
+		headers: {
+			Accept: 'application/vnd.github+json',
+			'X-GitHub-Api-Version': '2022-11-28',
+			'User-Agent': 'ytlc-styler'
+		}
+	});
+	if (response.status === 404) {
+		return null;
+	}
+
+	if (!response.ok) {
+		throw new Error(`Gist read failed (${response.status})`);
+	}
+
+	const gist = (await response.json()) as {
+		files?: Record<string, { content?: string; truncated?: boolean }>;
+	};
+
+	const files = gist.files;
+	if (!files || typeof files !== 'object') {
+		return null;
+	}
+
+	const preferred = files[GIST_FILE_NAME];
+	const fallback = Object.values(files)[0];
+	const file = preferred ?? fallback;
+	if (!file || typeof file.content !== 'string') {
+		return null;
+	}
+
+	if (file.truncated) {
+		throw new Error('Gist content is truncated and cannot be read fully.');
+	}
+
+	const stored = parseStoredOverlay(file.content);
+	if (!stored) {
+		return null;
+	}
+
+	return {
+		gistId: id,
+		stored
+	};
+};
+
+const getGistById = async (id: string): Promise<OverlayRecord | null> => {
+	const result = await getStoredOverlayFromGistId(id);
+	if (!result) {
+		return null;
+	}
+
+	return {
+		...toOverlayRecord(result.stored),
+		id: result.gistId
+	};
+};
+
+const findGistIdByOverlayUuid = async (overlayUuid: string): Promise<string | null> => {
+	const token = requireToken();
+
+	for (let page = 1; page <= GIST_LIST_MAX_PAGES; page += 1) {
+		const listResponse = await fetch(
+			`${GITHUB_GIST_API_URL}?per_page=${GIST_LIST_PAGE_SIZE}&page=${page}`,
+			{
+				headers: buildGistHeaders(token)
+			}
+		);
+
+		if (!listResponse.ok) {
+			throw new Error(`Gist lookup failed (${listResponse.status})`);
+		}
+
+		const gists = (await listResponse.json()) as Array<{
+			id?: string;
+			files?: Record<string, unknown>;
+		}>;
+
+		if (!Array.isArray(gists) || gists.length === 0) {
+			return null;
+		}
+
+		for (const gist of gists) {
+			if (!gist.id || !gist.files || !gist.files[GIST_FILE_NAME]) {
+				continue;
+			}
+
+			const candidate = await getStoredOverlayFromGistId(gist.id);
+			if (candidate?.stored.id === overlayUuid) {
+				return candidate.gistId;
+			}
+		}
+
+		if (gists.length < GIST_LIST_PAGE_SIZE) {
+			return null;
+		}
+	}
+
+	return null;
 };
 
 export const upsertOverlay = async (overlay: {
@@ -162,49 +272,19 @@ export const upsertOverlay = async (overlay: {
 };
 
 export const getOverlayById = async (id: string): Promise<OverlayRecord | null> => {
-	const response = await fetch(`${GITHUB_GIST_API_URL}/${encodeURIComponent(id)}`, {
-		headers: {
-			Accept: 'application/vnd.github+json',
-			'X-GitHub-Api-Version': '2022-11-28',
-			'User-Agent': 'ytlc-styler'
-		}
-	});
-	if (response.status === 404) {
+	const direct = await getGistById(id);
+	if (direct) {
+		return direct;
+	}
+
+	if (!isLikelyUuid(id)) {
 		return null;
 	}
 
-	if (!response.ok) {
-		throw new Error(`Gist read failed (${response.status})`);
-	}
-
-	const gist = (await response.json()) as {
-		files?: Record<string, { content?: string; truncated?: boolean }>;
-	};
-
-	const files = gist.files;
-	if (!files || typeof files !== 'object') {
+	const gistId = await findGistIdByOverlayUuid(id);
+	if (!gistId) {
 		return null;
 	}
 
-	const preferred = files[GIST_FILE_NAME];
-	const fallback = Object.values(files)[0];
-	const file = preferred ?? fallback;
-	if (!file || typeof file.content !== 'string') {
-		return null;
-	}
-
-	if (file.truncated) {
-		throw new Error('Gist content is truncated and cannot be read fully.');
-	}
-
-	const source = file.content;
-	const stored = parseStoredOverlay(source);
-	if (!stored) {
-		return null;
-	}
-
-	return {
-		...toOverlayRecord(stored),
-		id
-	};
+	return getGistById(gistId);
 };

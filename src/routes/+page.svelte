@@ -151,6 +151,38 @@ export {};
 		globalThis.crypto?.randomUUID?.() ??
 		`${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
+	const GIST_ID_REGEX = /^[a-f0-9]{8,}$/i;
+
+	const normalizeImportId = (rawValue: string): string => {
+		const trimmed = rawValue.trim();
+		if (!trimmed) {
+			return "";
+		}
+
+		const fromOverlayPath = trimmed.match(/\/overlay\/([^/?#]+)/i);
+		if (fromOverlayPath?.[1]) {
+			return decodeURIComponent(fromOverlayPath[1]);
+		}
+
+		try {
+			const parsed = new URL(trimmed, window.location.origin);
+			const segments = parsed.pathname.split("/").filter(Boolean);
+
+			if (segments[0] === "overlay" && segments[1]) {
+				return decodeURIComponent(segments[1]);
+			}
+
+			const gistSegment = [...segments].reverse().find((segment) => GIST_ID_REGEX.test(segment));
+			if (gistSegment) {
+				return gistSegment;
+			}
+		} catch {
+			// Keep raw input when not a URL.
+		}
+
+		return trimmed;
+	};
+
 	const makeDraft = (partial?: Partial<DraftEntry>): DraftEntry => ({
 		id: partial?.id ?? createDraftId(),
 		name: partial?.name ?? "Untitled Draft",
@@ -466,9 +498,9 @@ export {};
 	};
 
 	const importDraftById = async (rawId?: string) => {
-		const id = (rawId ?? importDraftId).trim();
+		const id = normalizeImportId(rawId ?? importDraftId);
 		if (!id) {
-			compileError = "draft uuid is required";
+			compileError = "draft ID is required";
 			return;
 		}
 
@@ -1173,11 +1205,10 @@ export {};
 		headline="Import Draft"
 	>
 		<p>
-			Enter the UUID of a previously exported draft to import it into the
-			editor.
+			Enter a previously exported draft UUID, gist ID, or overlay URL.
 		</p>
 		<div style="width: 100%; display: grid;">
-			<TextFieldOutlined label="Import UUID" bind:value={importDraftId} />
+			<TextFieldOutlined label="Import ID or URL" bind:value={importDraftId} />
 		</div>
 
 		{#snippet buttons()}

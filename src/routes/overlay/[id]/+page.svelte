@@ -93,7 +93,7 @@
 	bind:this={frame}
 	onload={onFrameLoad}
 	src={`/api/overlays/${data.overlay.id}/html`}
-	sandbox="allow-scripts"
+	sandbox="allow-scripts allow-same-origin"
 	class="overlay-frame"
 ></iframe>
 
