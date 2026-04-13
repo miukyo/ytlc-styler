@@ -3,7 +3,6 @@ import type { RequestHandler } from './$types';
 
 import { compileOverlay } from '$lib/server/compile';
 import { upsertOverlay } from '$lib/server/overlay-repository';
-import { v4 as uuidv4 } from 'uuid';
 
 export const POST: RequestHandler = async ({ request, url }) => {
 	const body = (await request.json()) as {
@@ -60,14 +59,26 @@ export const POST: RequestHandler = async ({ request, url }) => {
 		}
 	}
 
-	const id = typeof body.id === 'string' && body.id.trim().length > 0 ? body.id.trim() : uuidv4();
+	const requestedId = typeof body.id === 'string' && body.id.trim().length > 0 ? body.id.trim() : 'draft';
+	let savedOverlay;
 
-	await upsertOverlay({
-		id,
-		name: typeof body.name === 'string' ? body.name : null,
-		code: body.code,
-		compiledHtml
-	});
+	try {
+		savedOverlay = await upsertOverlay({
+			id: requestedId,
+			name: typeof body.name === 'string' ? body.name : null,
+			code: body.code,
+			compiledHtml
+		});
+	} catch (error) {
+		return json(
+			{
+				error: error instanceof Error ? error.message : 'GitHub Gist upload failed'
+			},
+			{ status: 502 }
+		);
+	}
+
+	const id = savedOverlay.id;
 
 	const exportUrl = new URL(`/overlay/${id}`, url.origin);
 	if (handle) {

@@ -693,7 +693,29 @@ export {};
 			}
 
 			if (payload.id !== activeDraftId) {
+				const previousDraftId = activeDraftId;
+				const previousIndex = drafts.findIndex((draft) => draft.id === previousDraftId);
+				const targetIndex = drafts.findIndex((draft) => draft.id === payload.id);
+
+				if (targetIndex !== -1 && targetIndex !== previousIndex) {
+					drafts = drafts.filter((_, index) => index !== targetIndex);
+				}
+
+				const nextIndex = drafts.findIndex((draft) => draft.id === previousDraftId);
+				if (nextIndex !== -1) {
+					drafts = drafts.map((draft, index) =>
+						index === nextIndex
+							? {
+									...draft,
+									id: payload.id,
+									updatedAt: new Date().toISOString(),
+								}
+							: draft,
+					);
+				}
+
 				activeDraftId = payload.id;
+				persistDrafts();
 			}
 			saveCurrentDraft();
 			exportUrl = payload.url;

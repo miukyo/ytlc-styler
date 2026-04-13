@@ -8,7 +8,6 @@
 		"build": "vite build",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
-		"db:migrate": "node scripts/apply-sql-migrations.mjs",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
 	},
@@ -19,9 +18,7 @@
 		"@sveltejs/kit": "^2.50.2",
 		"@sveltejs/vite-plugin-svelte": "^6.2.4",
 		"@types/node": "^25.5.0",
-		"@types/pg": "^8.18.0",
 		"dotenv": "^17.3.1",
-		"supabase": "^2.81.3",
 		"svelte": "^5.51.0",
 		"svelte-check": "^4.4.2",
 		"typescript": "^5.9.3",
@@ -30,11 +27,8 @@
 	"dependencies": {
 		"@miukyo/ytlc": "^0.1.3",
 		"esbuild": "^0.27.4",
-		"kysely": "^0.28.12",
-		"kysely-supabase": "^0.2.1",
 		"m3-svelte": "^7.1.2",
 		"modern-monaco": "^0.4.0",
-		"pg": "^8.16.3",
 		"prettier": "^3.8.1",
 		"uuid": "^13.0.0",
 		"vite-plugin-functions-mixins": "^0.4.1"

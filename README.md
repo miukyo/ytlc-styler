@@ -8,7 +8,7 @@ Web-based Svelte overlay editor for YouTube live chat overlays.
 - modern-monaco editor
 - Custom runtime for HTML + JavaScript + CSS overlays
 - Svelte-like template syntax support (`{#each ...}` and `{expr}`)
-- Supabase Postgres + Kysely for overlay persistence
+- GitHub Gist API for overlay persistence
 - `@miukyo/ytlc` bridge for live chat and dummy messages
 
 ## Routes
@@ -44,25 +44,18 @@ npm run build
 
 ## Storage
 
-Set one of these environment variables before running the app:
+Set this environment variable before running the app:
 
-- `DATABASE_URL`
-- `SUPABASE_DB_URL`
+- `GITHUB_GIST_TOKEN`
 
-Run database setup:
+Token requirement:
 
-```sh
-npm run db:migrate
-```
+- Personal access token with permission to create private gists.
 
-Expected schema:
+How it works:
 
-- `public.overlays(id text primary key, name text null, code text not null, compiled_js text not null, created_at text not null, updated_at text not null)`
+- Exports create a private GitHub gist containing overlay JSON payload.
+- Returned overlay ID is the gist id.
+- Overlay fetch routes read from `https://api.github.com/gists/:id`.
 
-Generate Supabase types (recommended) and map them through `kysely-supabase`:
-
-```sh
-npx supabase gen types typescript --linked > src/lib/server/supabase.generated.ts
-```
-
-Then replace the inline schema in `src/lib/server/db.types.ts` with an import from your generated file.
+GitHub Gist API docs: https://docs.github.com/en/rest/gists/gists
