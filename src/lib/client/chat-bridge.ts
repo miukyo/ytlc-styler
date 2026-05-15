@@ -56,6 +56,10 @@ export class ChatBridge {
 	private readyPromise: Promise<void> | null = null;
 	private reconnectTimer: number | null = null;
 	private reconnectAttempts = 0;
+	private backendRestartTimer: number | null = null;
+	private backendRestartAttempts = 0;
+	private lastStartOptions: BridgeStartOptions | null = null;
+	private shouldKeepChatRunning = false;
 	private lifecycleHooksBound = false;
 	private dummySequence = 0;
 
@@ -77,6 +81,15 @@ export class ChatBridge {
 
 		window.clearTimeout(this.reconnectTimer);
 		this.reconnectTimer = null;
+	}
+
+	private clearBackendRestartTimer(): void {
+		if (this.backendRestartTimer === null) {
+			return;
+		}
+
+		window.clearTimeout(this.backendRestartTimer);
+		this.backendRestartTimer = null;
 	}
 
 	private getReconnectDelayMs(): number {
@@ -126,6 +139,63 @@ export class ChatBridge {
 		}, delayMs);
 	}
 
+	private hasStartTarget(options: BridgeStartOptions | null): options is BridgeStartOptions {
+		if (!options) {
+			return false;
+		}
+
+		return Boolean(options.handle || options.channelId || options.liveId);
+	}
+
+	private parseRestartDelayMs(reason: string | undefined): number {
+		if (!reason) {
+			return 2_000;
+		}
+
+		const match = /reconnecting in\s+(\d+)ms/i.exec(reason);
+		if (!match) {
+			return 2_000;
+		}
+
+		const delay = Number(match[1]);
+		if (!Number.isFinite(delay) || delay < 0) {
+			return 2_000;
+		}
+
+		return delay;
+	}
+
+	private scheduleBackendRestart(delayMs = this.getReconnectDelayMs()): void {
+		if (!this.shouldKeepChatRunning || !this.hasStartTarget(this.lastStartOptions)) {
+			return;
+		}
+
+		if (this.backendRestartTimer !== null) {
+			return;
+		}
+
+		this.backendRestartTimer = window.setTimeout(() => {
+			this.backendRestartTimer = null;
+			void this.restartBackendChat();
+		}, delayMs);
+	}
+
+	private async restartBackendChat(): Promise<void> {
+		if (!this.shouldKeepChatRunning || !this.hasStartTarget(this.lastStartOptions)) {
+			return;
+		}
+
+		try {
+			await this.start(this.lastStartOptions);
+			this.backendRestartAttempts = 0;
+		} catch {
+			this.backendRestartAttempts += 1;
+			const baseDelay = this.getReconnectDelayMs();
+			const retryDelay = Math.min(30_000, baseDelay * 2 ** this.backendRestartAttempts);
+			this.scheduleBackendRestart(retryDelay);
+		}
+	}
+
 	private async reconnect(): Promise<void> {
 		if (!this.listeners.size) {
 			return;
@@ -154,11 +224,43 @@ export class ChatBridge {
 		eventSource.onmessage = (event) => {
 			const payload = JSON.parse(event.data) as {
 				type?: 'chat:item' | 'chat:error' | 'chat:stopped' | 'chat:started';
-				payload?: unknown;
+				payload?: {
+					message?: string;
+					reason?: string;
+					[key: string]: unknown;
+				};
 			};
 
 			if (payload.type === 'chat:item') {
 				this.emit(payload.payload);
+				return;
+			}
+
+			if (payload.type === 'chat:started') {
+				this.backendRestartAttempts = 0;
+				this.clearBackendRestartTimer();
+				return;
+			}
+
+			if (payload.type === 'chat:error') {
+				const message = payload.payload?.message;
+				if (/\b403\b/.test(message ?? '')) {
+					this.scheduleBackendRestart(this.parseRestartDelayMs(message));
+				}
+				return;
+			}
+
+			if (payload.type === 'chat:stopped') {
+				const reason = payload.payload?.reason;
+				if (!this.shouldKeepChatRunning) {
+					return;
+				}
+
+				if (/stopped from api|session disposed/i.test(reason ?? '')) {
+					return;
+				}
+
+				this.scheduleBackendRestart(this.parseRestartDelayMs(reason));
 			}
 		};
 	}
@@ -397,6 +499,14 @@ export class ChatBridge {
 	}
 
 	async start(options: BridgeStartOptions): Promise<void> {
+		this.shouldKeepChatRunning = true;
+		this.lastStartOptions = {
+			handle: options.handle,
+			channelId: options.channelId,
+			liveId: options.liveId,
+			overwrite: true
+		};
+		this.clearBackendRestartTimer();
 		await this.init();
 		const response = await fetch('/api/chat/start', {
 			method: 'POST',
@@ -408,9 +518,14 @@ export class ChatBridge {
 			const payload = (await response.json()) as { error?: string };
 			throw new Error(payload.error ?? 'Unable to start chat');
 		}
+
+		this.backendRestartAttempts = 0;
 	}
 
 	async stop(): Promise<void> {
+		this.shouldKeepChatRunning = false;
+		this.clearBackendRestartTimer();
+		this.backendRestartAttempts = 0;
 		await fetch('/api/chat/stop', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
@@ -424,6 +539,8 @@ export class ChatBridge {
 
 	disconnect(): void {
 		this.clearReconnectTimer();
+		this.clearBackendRestartTimer();
+		this.shouldKeepChatRunning = false;
 
 		if (!this.eventSource) {
 			this.initialized = false;
