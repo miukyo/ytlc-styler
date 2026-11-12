@@ -64,6 +64,7 @@ export class ChatBridge {
 	private shouldKeepChatRunning = false;
 	private lifecycleHooksBound = false;
 	private dummySequence = 0;
+	private chatState: string | undefined = undefined;
 
 	constructor(sessionId?: string) {
 		const fallback = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -141,7 +142,10 @@ export class ChatBridge {
 
 		try {
 			this.pollAbortController = new AbortController();
-			const url = `/api/chat/poll?sessionId=${encodeURIComponent(this.sessionId)}&cursor=${this.cursor}&_t=${Date.now()}`;
+			let url = `/api/chat/poll?sessionId=${encodeURIComponent(this.sessionId)}&cursor=${this.cursor}&_t=${Date.now()}`;
+			if (this.chatState) {
+				url += `&state=${encodeURIComponent(this.chatState)}`;
+			}
 			const response = await fetch(url, {
 				signal: this.pollAbortController.signal,
 				cache: 'no-store',
@@ -159,6 +163,7 @@ export class ChatBridge {
 			const data = (await response.json()) as {
 				ok?: boolean;
 				cursor?: number;
+				state?: string;
 				events?: Array<{
 					id: number;
 					type: 'chat:item' | 'chat:error' | 'chat:stopped' | 'chat:started';
@@ -167,6 +172,10 @@ export class ChatBridge {
 			};
 
 			this.pollConsecutiveErrors = 0;
+
+			if (typeof data.state === 'string') {
+				this.chatState = data.state;
+			}
 
 			if (typeof data.cursor === 'number') {
 				this.cursor = Math.max(this.cursor, data.cursor);
@@ -550,6 +559,11 @@ export class ChatBridge {
 			throw new Error(payload.error ?? 'Unable to start chat');
 		}
 
+		const payload = (await response.json()) as { ok?: boolean; state?: string };
+		if (payload.state) {
+			this.chatState = payload.state;
+		}
+
 		this.backendRestartAttempts = 0;
 		this.clearPollTimer();
 		void this.poll();
@@ -557,6 +571,7 @@ export class ChatBridge {
 
 	async stop(): Promise<void> {
 		this.shouldKeepChatRunning = false;
+		this.chatState = undefined;
 		this.clearBackendRestartTimer();
 		this.backendRestartAttempts = 0;
 		await fetch('/api/chat/stop', {
@@ -575,6 +590,7 @@ export class ChatBridge {
 		this.clearBackendRestartTimer();
 		this.shouldKeepChatRunning = false;
 		this.isPolling = false;
+		this.chatState = undefined;
 
 		if (this.pollAbortController) {
 			this.pollAbortController.abort();

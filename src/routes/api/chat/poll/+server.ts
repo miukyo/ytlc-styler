@@ -11,14 +11,16 @@ export const GET: RequestHandler = async ({ url }) => {
 
 	const rawCursor = url.searchParams.get('cursor');
 	const cursor = rawCursor !== null ? Math.max(0, parseInt(rawCursor, 10) || 0) : 0;
+	const state = url.searchParams.get('state') ?? undefined;
 
-	const result = chatManager.poll(sessionId, cursor);
+	const result = await chatManager.poll(sessionId, cursor, state);
 
 	return json(
 		{
 			ok: true,
 			cursor: result.cursor,
-			events: result.events
+			events: result.events,
+			state: result.state
 		},
 		{
 			headers: {
@@ -31,4 +33,3 @@ export const GET: RequestHandler = async ({ url }) => {
 		}
 	);
 };
-

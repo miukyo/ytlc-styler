@@ -1,4 +1,10 @@
-import { YTLiveChat, type SendDummyOptions, type StartOptions } from '@miukyo/ytlc';
+import { YTLiveChat, YTHttpClient, type SendDummyOptions, type StartOptions } from '@miukyo/ytlc';
+import {
+	parseActionToChatItem,
+	parseLiveChatResponse,
+	parseLivePage,
+	type ParsedLivePage
+} from './yt-parser';
 
 export interface ChatEventEnvelope {
 	type: 'chat:item' | 'chat:error' | 'chat:stopped' | 'chat:started';
@@ -14,18 +20,27 @@ type ChatSink = (event: ChatEventEnvelope) => void;
 
 class ChatSession {
 	private readonly chat: YTLiveChat;
+	private readonly httpClient: YTHttpClient;
 	private readonly sinks = new Set<ChatSink>();
 	private readonly sessionId: string;
 	private lastActivityAt = Date.now();
 	private events: StoredChatEvent[] = [];
 	private nextEventId = 0;
 	private readonly maxEvents = 1000;
+	private fetchOptions?: ParsedLivePage;
+	private isFetching = false;
 
 	constructor(sessionId: string) {
 		this.sessionId = sessionId;
-		this.chat = new YTLiveChat({
-			debugLogReceivedJsonItems: false
+		this.httpClient = new YTHttpClient({
+			fetchImplementation: (url, init) => fetch(url, init)
 		});
+		this.chat = new YTLiveChat(
+			{
+				debugLogReceivedJsonItems: false
+			},
+			this.httpClient
+		);
 
 		this.chat.on('chatReceived', ({ chatItem }) => {
 			this.emit({ type: 'chat:item', payload: chatItem });
@@ -65,8 +80,62 @@ class ChatSession {
 		}
 	}
 
-	poll(cursor: number): { cursor: number; events: StoredChatEvent[] } {
+	serializeState(): string | undefined {
+		if (!this.fetchOptions) {
+			return undefined;
+		}
+		try {
+			return btoa(JSON.stringify(this.fetchOptions));
+		} catch {
+			return undefined;
+		}
+	}
+
+	restoreState(state: string): void {
+		try {
+			const decoded = JSON.parse(atob(state));
+			if (decoded && decoded.apiKey && decoded.continuation) {
+				this.fetchOptions = decoded;
+			}
+		} catch {
+			// Ignore invalid state
+		}
+	}
+
+	async poll(
+		cursor: number,
+		state?: string
+	): Promise<{ cursor: number; events: StoredChatEvent[]; state?: string }> {
 		this.touch();
+
+		if (state && !this.fetchOptions) {
+			this.restoreState(state);
+		}
+
+		if (this.fetchOptions && !this.isFetching) {
+			this.isFetching = true;
+			try {
+				const response = await this.httpClient.fetchLiveChatData(this.fetchOptions);
+				const parsed = parseLiveChatResponse(response);
+				if (parsed.continuation) {
+					this.fetchOptions.continuation = parsed.continuation;
+				}
+				if (Array.isArray(parsed.actions)) {
+					for (const action of parsed.actions) {
+						const chatItem = parseActionToChatItem(action);
+						if (chatItem) {
+							this.emit({ type: 'chat:item', payload: chatItem });
+						}
+					}
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.emit({ type: 'chat:error', payload: { message } });
+			} finally {
+				this.isFetching = false;
+			}
+		}
+
 		if (cursor < 0) {
 			cursor = 0;
 		}
@@ -74,25 +143,39 @@ class ChatSession {
 		if (cursor === 0 && this.events.length > 50) {
 			return {
 				cursor: this.nextEventId,
-				events: this.events.slice(-50)
+				events: this.events.slice(-50),
+				state: this.serializeState()
 			};
 		}
 
 		const events = this.events.filter((item) => item.id > cursor);
 		return {
 			cursor: this.nextEventId,
-			events
+			events,
+			state: this.serializeState()
 		};
 	}
 
-	async start(options: StartOptions): Promise<void> {
+	async start(options: StartOptions): Promise<string | undefined> {
 		this.touch();
-		await this.chat.start({ ...options, overwrite: true });
-		this.emit({ type: 'chat:started', payload: { ...options, sessionId: this.sessionId } });
+		try {
+			const rawPage = await this.httpClient.fetchLivePage(options);
+			this.fetchOptions = parseLivePage(rawPage);
+			this.emit({
+				type: 'chat:started',
+				payload: { ...options, sessionId: this.sessionId, liveId: this.fetchOptions.liveId }
+			});
+			return this.serializeState();
+		} catch (error) {
+			const wrapped = error instanceof Error ? error : new Error(String(error));
+			this.emit({ type: 'chat:error', payload: { message: wrapped.message } });
+			throw wrapped;
+		}
 	}
 
 	stop(reason = 'Stopped from API.'): void {
 		this.touch();
+		this.fetchOptions = undefined;
 		this.chat.stop(reason);
 	}
 
@@ -110,6 +193,7 @@ class ChatSession {
 	}
 
 	dispose(): void {
+		this.fetchOptions = undefined;
 		this.chat.stop('Session disposed.');
 		this.sinks.clear();
 		this.events = [];
@@ -135,12 +219,16 @@ class ChatManager {
 		return this.getOrCreate(sessionId).subscribe(sink);
 	}
 
-	poll(sessionId: string, cursor: number): { cursor: number; events: StoredChatEvent[] } {
-		return this.getOrCreate(sessionId).poll(cursor);
+	async poll(
+		sessionId: string,
+		cursor: number,
+		state?: string
+	): Promise<{ cursor: number; events: StoredChatEvent[]; state?: string }> {
+		return this.getOrCreate(sessionId).poll(cursor, state);
 	}
 
-	async start(sessionId: string, options: StartOptions): Promise<void> {
-		await this.getOrCreate(sessionId).start(options);
+	async start(sessionId: string, options: StartOptions): Promise<string | undefined> {
+		return this.getOrCreate(sessionId).start(options);
 	}
 
 	stop(sessionId: string, reason = 'Stopped from API.'): void {

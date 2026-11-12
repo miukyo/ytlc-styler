@@ -20,13 +20,13 @@ export const POST: RequestHandler = async ({ request }) => {
 	}
 
 	try {
-		await chatManager.start(body.sessionId, {
+		const state = await chatManager.start(body.sessionId, {
 			handle: body.handle,
 			channelId: body.channelId,
 			liveId: body.liveId,
 			overwrite: true
 		});
-		return json({ ok: true });
+		return json({ ok: true, state });
 	} catch (error) {
 		return json(
 			{ error: error instanceof Error ? error.message : 'Unable to start chat' },
