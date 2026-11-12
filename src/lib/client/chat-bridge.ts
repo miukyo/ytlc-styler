@@ -50,12 +50,14 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
 
 export class ChatBridge {
 	private readonly sessionId: string;
-	private eventSource: EventSource | null = null;
 	private readonly listeners = new Set<ChatCallback>();
 	private initialized = false;
-	private readyPromise: Promise<void> | null = null;
-	private reconnectTimer: number | null = null;
-	private reconnectAttempts = 0;
+	private cursor = 0;
+	private isPolling = false;
+	private pollTimer: number | null = null;
+	private pollAbortController: AbortController | null = null;
+	private pollConsecutiveErrors = 0;
+	private readonly pollIntervalMs = 1000;
 	private backendRestartTimer: number | null = null;
 	private backendRestartAttempts = 0;
 	private lastStartOptions: BridgeStartOptions | null = null;
@@ -74,13 +76,13 @@ export class ChatBridge {
 		}
 	}
 
-	private clearReconnectTimer(): void {
-		if (this.reconnectTimer === null) {
+	private clearPollTimer(): void {
+		if (this.pollTimer === null) {
 			return;
 		}
 
-		window.clearTimeout(this.reconnectTimer);
-		this.reconnectTimer = null;
+		window.clearTimeout(this.pollTimer);
+		this.pollTimer = null;
 	}
 
 	private clearBackendRestartTimer(): void {
@@ -95,8 +97,137 @@ export class ChatBridge {
 	private getReconnectDelayMs(): number {
 		const baseDelay = 1_000;
 		const maxDelay = 15_000;
-		const delay = Math.min(maxDelay, baseDelay * 2 ** this.reconnectAttempts);
+		const delay = Math.min(maxDelay, baseDelay * 2 ** this.backendRestartAttempts);
 		return delay + Math.floor(Math.random() * 250);
+	}
+
+	private getPollDelayMs(): number {
+		if (this.pollConsecutiveErrors === 0) {
+			return this.pollIntervalMs;
+		}
+		const baseDelay = 1_000;
+		const maxDelay = 15_000;
+		const delay = Math.min(maxDelay, baseDelay * 2 ** Math.min(this.pollConsecutiveErrors, 4));
+		return delay + Math.floor(Math.random() * 250);
+	}
+
+	private scheduleNextPoll(delayMs = this.getPollDelayMs()): void {
+		if (!this.isPolling || !this.listeners.size) {
+			this.isPolling = false;
+			return;
+		}
+
+		this.clearPollTimer();
+		this.pollTimer = window.setTimeout(() => {
+			this.pollTimer = null;
+			void this.poll();
+		}, delayMs);
+	}
+
+	private startPolling(): void {
+		if (this.isPolling) {
+			return;
+		}
+		this.isPolling = true;
+		this.clearPollTimer();
+		void this.poll();
+	}
+
+	private async poll(): Promise<void> {
+		if (!this.isPolling || !this.listeners.size) {
+			this.isPolling = false;
+			return;
+		}
+
+		try {
+			this.pollAbortController = new AbortController();
+			const response = await fetch(
+				`/api/chat/poll?sessionId=${encodeURIComponent(this.sessionId)}&cursor=${this.cursor}`,
+				{
+					signal: this.pollAbortController.signal,
+					headers: {
+						Accept: 'application/json'
+					}
+				}
+			);
+
+			if (!response.ok) {
+				throw new Error(`Poll failed with status ${response.status}`);
+			}
+
+			const data = (await response.json()) as {
+				ok?: boolean;
+				cursor?: number;
+				events?: Array<{
+					id: number;
+					type: 'chat:item' | 'chat:error' | 'chat:stopped' | 'chat:started';
+					payload: unknown;
+				}>;
+			};
+
+			this.pollConsecutiveErrors = 0;
+
+			if (typeof data.cursor === 'number') {
+				this.cursor = Math.max(this.cursor, data.cursor);
+			}
+
+			if (Array.isArray(data.events)) {
+				for (const event of data.events) {
+					this.handleEvent(event);
+				}
+			}
+		} catch (error) {
+			if (error instanceof Error && error.name === 'AbortError') {
+				return;
+			}
+			this.pollConsecutiveErrors += 1;
+		} finally {
+			this.pollAbortController = null;
+			if (this.isPolling && this.listeners.size > 0) {
+				this.scheduleNextPoll();
+			} else {
+				this.isPolling = false;
+			}
+		}
+	}
+
+	private handleEvent(event: {
+		type: 'chat:item' | 'chat:error' | 'chat:stopped' | 'chat:started';
+		payload: unknown;
+	}): void {
+		if (event.type === 'chat:item') {
+			this.emit(event.payload);
+			return;
+		}
+
+		if (event.type === 'chat:started') {
+			this.backendRestartAttempts = 0;
+			this.clearBackendRestartTimer();
+			return;
+		}
+
+		if (event.type === 'chat:error') {
+			const payload = event.payload as { message?: string } | undefined;
+			const message = payload?.message;
+			if (/\b403\b/.test(message ?? '')) {
+				this.scheduleBackendRestart(this.parseRestartDelayMs(message));
+			}
+			return;
+		}
+
+		if (event.type === 'chat:stopped') {
+			const payload = event.payload as { reason?: string } | undefined;
+			const reason = payload?.reason;
+			if (!this.shouldKeepChatRunning) {
+				return;
+			}
+
+			if (/stopped from api|session disposed/i.test(reason ?? '')) {
+				return;
+			}
+
+			this.scheduleBackendRestart(this.parseRestartDelayMs(reason));
+		}
 	}
 
 	private bindLifecycleHooks(): void {
@@ -109,8 +240,11 @@ export class ChatBridge {
 				return;
 			}
 
-			if (!this.eventSource || this.eventSource.readyState === EventSource.CLOSED) {
-				this.scheduleReconnect(0);
+			if (!this.isPolling) {
+				this.startPolling();
+			} else {
+				this.clearPollTimer();
+				void this.poll();
 			}
 		};
 
@@ -122,21 +256,6 @@ export class ChatBridge {
 		});
 
 		this.lifecycleHooksBound = true;
-	}
-
-	private scheduleReconnect(delayMs = this.getReconnectDelayMs()): void {
-		if (!this.listeners.size) {
-			return;
-		}
-
-		if (this.reconnectTimer !== null) {
-			return;
-		}
-
-		this.reconnectTimer = window.setTimeout(() => {
-			this.reconnectTimer = null;
-			void this.reconnect();
-		}, delayMs);
 	}
 
 	private hasStartTarget(options: BridgeStartOptions | null): options is BridgeStartOptions {
@@ -194,75 +313,6 @@ export class ChatBridge {
 			const retryDelay = Math.min(30_000, baseDelay * 2 ** this.backendRestartAttempts);
 			this.scheduleBackendRestart(retryDelay);
 		}
-	}
-
-	private async reconnect(): Promise<void> {
-		if (!this.listeners.size) {
-			return;
-		}
-
-		this.disconnect();
-		await this.init();
-	}
-
-	private wireEventSource(eventSource: EventSource): void {
-		eventSource.onopen = () => {
-			this.reconnectAttempts = 0;
-		};
-
-		eventSource.onerror = () => {
-			if (!this.listeners.size) {
-				return;
-			}
-
-			if (eventSource.readyState === EventSource.CLOSED) {
-				this.reconnectAttempts += 1;
-				this.scheduleReconnect();
-			}
-		};
-
-		eventSource.onmessage = (event) => {
-			const payload = JSON.parse(event.data) as {
-				type?: 'chat:item' | 'chat:error' | 'chat:stopped' | 'chat:started';
-				payload?: {
-					message?: string;
-					reason?: string;
-					[key: string]: unknown;
-				};
-			};
-
-			if (payload.type === 'chat:item') {
-				this.emit(payload.payload);
-				return;
-			}
-
-			if (payload.type === 'chat:started') {
-				this.backendRestartAttempts = 0;
-				this.clearBackendRestartTimer();
-				return;
-			}
-
-			if (payload.type === 'chat:error') {
-				const message = payload.payload?.message;
-				if (/\b403\b/.test(message ?? '')) {
-					this.scheduleBackendRestart(this.parseRestartDelayMs(message));
-				}
-				return;
-			}
-
-			if (payload.type === 'chat:stopped') {
-				const reason = payload.payload?.reason;
-				if (!this.shouldKeepChatRunning) {
-					return;
-				}
-
-				if (/stopped from api|session disposed/i.test(reason ?? '')) {
-					return;
-				}
-
-				this.scheduleBackendRestart(this.parseRestartDelayMs(reason));
-			}
-		};
 	}
 
 	private randomInt(min: number, max: number): number {
@@ -456,40 +506,20 @@ export class ChatBridge {
 
 	async init(): Promise<void> {
 		if (this.initialized) {
-			if (this.readyPromise) {
-				await this.readyPromise;
-			}
 			return;
 		}
 
 		this.bindLifecycleHooks();
-		this.clearReconnectTimer();
-
-		this.eventSource = new EventSource(`/api/chat/events?sessionId=${encodeURIComponent(this.sessionId)}`);
-		const source = this.eventSource;
-		this.wireEventSource(source);
-		this.readyPromise = new Promise<void>((resolve) => {
-			const previousOnOpen = source.onopen;
-			source.onopen = (event) => {
-				previousOnOpen?.call(source, event);
-				resolve();
-			};
-
-			const previousOnError = source.onerror;
-			source.onerror = (event) => {
-				previousOnError?.call(source, event);
-				// Keep bridge usable even if ready signal is delayed or unavailable.
-				resolve();
-			};
-		});
-
+		this.startPolling();
 		this.initialized = true;
-		await this.readyPromise;
 	}
 
 	subscribe(callback: ChatCallback): () => void {
 		this.listeners.add(callback);
 		void this.init();
+		if (!this.isPolling) {
+			this.startPolling();
+		}
 		return () => {
 			this.listeners.delete(callback);
 			if (!this.listeners.size) {
@@ -520,6 +550,8 @@ export class ChatBridge {
 		}
 
 		this.backendRestartAttempts = 0;
+		this.clearPollTimer();
+		void this.poll();
 	}
 
 	async stop(): Promise<void> {
@@ -538,18 +570,15 @@ export class ChatBridge {
 	}
 
 	disconnect(): void {
-		this.clearReconnectTimer();
+		this.clearPollTimer();
 		this.clearBackendRestartTimer();
 		this.shouldKeepChatRunning = false;
+		this.isPolling = false;
 
-		if (!this.eventSource) {
-			this.initialized = false;
-			this.readyPromise = null;
-			return;
+		if (this.pollAbortController) {
+			this.pollAbortController.abort();
+			this.pollAbortController = null;
 		}
-		this.eventSource.close();
-		this.eventSource = null;
 		this.initialized = false;
-		this.readyPromise = null;
 	}
 }

@@ -1,5 +1,3 @@
-import { transform } from 'esbuild';
-
 const countMatches = (value: string, pattern: RegExp): number => {
 	const matches = value.match(pattern);
 	return matches ? matches.length : 0;
@@ -37,25 +35,62 @@ const composeSource = ({ script, style, markup }: { script: string; style: strin
 	return `${chunks.join('\n\n')}\n`;
 };
 
+const ensureNodeGlobals = () => {
+	if (typeof (globalThis as any).__filename === 'undefined') {
+		Object.defineProperty(globalThis, '__filename', {
+			value: '',
+			configurable: true,
+			writable: true
+		});
+	}
+	if (typeof (globalThis as any).__dirname === 'undefined') {
+		Object.defineProperty(globalThis, '__dirname', {
+			value: '',
+			configurable: true,
+			writable: true
+		});
+	}
+};
+
 const transpileScript = async (script: string): Promise<string> => {
 	if (!script.trim()) {
 		return '';
 	}
 
 	try {
-		const result = await transform(script, {
-			loader: 'ts',
-			target: 'es2020'
+		ensureNodeGlobals();
+		const ts = await import('typescript');
+		const transpile = ts.default?.transpileModule ?? ts.transpileModule;
+		const ScriptTarget = ts.default?.ScriptTarget ?? ts.ScriptTarget;
+		const ModuleKind = ts.default?.ModuleKind ?? ts.ModuleKind;
+
+		const result = transpile(script, {
+			compilerOptions: {
+				target: ScriptTarget.ES2020,
+				module: ModuleKind.ESNext
+			}
 		});
 
-		return result.code.trim();
+		return result.outputText.trim();
 	} catch (error) {
 		throw new Error(`TypeScript compile failed: ${error instanceof Error ? error.message : String(error)}`);
 	}
 };
 
+const encodeBase64Utf8 = (value: string): string => {
+	if (typeof Buffer !== 'undefined') {
+		return Buffer.from(value, 'utf-8').toString('base64');
+	}
+	const bytes = new TextEncoder().encode(value);
+	let binary = '';
+	for (const byte of bytes) {
+		binary += String.fromCharCode(byte);
+	}
+	return btoa(binary);
+};
+
 const toCompiledHtml = (source: string): string => {
-	const encodedSource = Buffer.from(source, 'utf-8').toString('base64');
+	const encodedSource = encodeBase64Utf8(source);
 
 	return `<!doctype html>
 <html lang="en">

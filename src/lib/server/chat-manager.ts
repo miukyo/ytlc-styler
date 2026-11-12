@@ -1,8 +1,13 @@
 import { YTLiveChat, type SendDummyOptions, type StartOptions } from '@miukyo/ytlc';
 
-interface ChatEventEnvelope {
+export interface ChatEventEnvelope {
 	type: 'chat:item' | 'chat:error' | 'chat:stopped' | 'chat:started';
 	payload: unknown;
+}
+
+export interface StoredChatEvent extends ChatEventEnvelope {
+	id: number;
+	timestamp: number;
 }
 
 type ChatSink = (event: ChatEventEnvelope) => void;
@@ -12,6 +17,9 @@ class ChatSession {
 	private readonly sinks = new Set<ChatSink>();
 	private readonly sessionId: string;
 	private lastActivityAt = Date.now();
+	private events: StoredChatEvent[] = [];
+	private nextEventId = 0;
+	private readonly maxEvents = 1000;
 
 	constructor(sessionId: string) {
 		this.sessionId = sessionId;
@@ -42,9 +50,39 @@ class ChatSession {
 
 	private emit(event: ChatEventEnvelope): void {
 		this.touch();
+		const stored: StoredChatEvent = {
+			id: ++this.nextEventId,
+			type: event.type,
+			payload: event.payload,
+			timestamp: Date.now()
+		};
+		this.events.push(stored);
+		if (this.events.length > this.maxEvents) {
+			this.events.splice(0, this.events.length - this.maxEvents);
+		}
 		for (const sink of this.sinks) {
 			sink(event);
 		}
+	}
+
+	poll(cursor: number): { cursor: number; events: StoredChatEvent[] } {
+		this.touch();
+		if (cursor < 0) {
+			cursor = 0;
+		}
+
+		if (cursor === 0 && this.events.length > 50) {
+			return {
+				cursor: this.nextEventId,
+				events: this.events.slice(-50)
+			};
+		}
+
+		const events = this.events.filter((item) => item.id > cursor);
+		return {
+			cursor: this.nextEventId,
+			events
+		};
 	}
 
 	async start(options: StartOptions): Promise<void> {
@@ -74,6 +112,7 @@ class ChatSession {
 	dispose(): void {
 		this.chat.stop('Session disposed.');
 		this.sinks.clear();
+		this.events = [];
 	}
 }
 
@@ -94,6 +133,10 @@ class ChatManager {
 
 	subscribe(sessionId: string, sink: ChatSink): () => void {
 		return this.getOrCreate(sessionId).subscribe(sink);
+	}
+
+	poll(sessionId: string, cursor: number): { cursor: number; events: StoredChatEvent[] } {
+		return this.getOrCreate(sessionId).poll(cursor);
 	}
 
 	async start(sessionId: string, options: StartOptions): Promise<void> {

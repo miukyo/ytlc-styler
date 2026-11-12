@@ -3,5 +3,9 @@ import { defineConfig } from 'vite';
 import { functionsMixins } from 'vite-plugin-functions-mixins';
 
 export default defineConfig({
+	define: {
+		__filename: '""',
+		__dirname: '""'
+	},
 	plugins: [sveltekit(), functionsMixins({ deps: ['m3-svelte'] })]
 });
