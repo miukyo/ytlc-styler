@@ -141,15 +141,16 @@ export class ChatBridge {
 
 		try {
 			this.pollAbortController = new AbortController();
-			const response = await fetch(
-				`/api/chat/poll?sessionId=${encodeURIComponent(this.sessionId)}&cursor=${this.cursor}`,
-				{
-					signal: this.pollAbortController.signal,
-					headers: {
-						Accept: 'application/json'
-					}
+			const url = `/api/chat/poll?sessionId=${encodeURIComponent(this.sessionId)}&cursor=${this.cursor}&_t=${Date.now()}`;
+			const response = await fetch(url, {
+				signal: this.pollAbortController.signal,
+				cache: 'no-store',
+				headers: {
+					Accept: 'application/json',
+					'Cache-Control': 'no-cache, no-store',
+					Pragma: 'no-cache'
 				}
-			);
+			});
 
 			if (!response.ok) {
 				throw new Error(`Poll failed with status ${response.status}`);

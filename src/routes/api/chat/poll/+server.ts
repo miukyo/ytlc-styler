@@ -22,8 +22,11 @@ export const GET: RequestHandler = async ({ url }) => {
 		},
 		{
 			headers: {
-				'Cache-Control': 'no-store, no-cache, must-revalidate',
-				Pragma: 'no-cache'
+				'Cache-Control': 'private, no-cache, no-store, max-age=0, must-revalidate, no-transform',
+				'CDN-Cache-Control': 'no-store',
+				'Cloudflare-CDN-Cache-Control': 'no-store',
+				Pragma: 'no-cache',
+				Expires: '0'
 			}
 		}
 	);
