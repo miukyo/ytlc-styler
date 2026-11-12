@@ -57,7 +57,7 @@ export class ChatBridge {
 	private pollTimer: number | null = null;
 	private pollAbortController: AbortController | null = null;
 	private pollConsecutiveErrors = 0;
-	private readonly pollIntervalMs = 1000;
+	private readonly pollIntervalMs = 3000;
 	private backendRestartTimer: number | null = null;
 	private backendRestartAttempts = 0;
 	private lastStartOptions: BridgeStartOptions | null = null;
